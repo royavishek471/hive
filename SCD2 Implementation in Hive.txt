@@ -1,0 +1,193 @@
+hive> create table emp_hist(
+    > empid int,
+    > city String,
+    > eff_dt date,
+    > exp_dt date
+    > )
+    > row format delimited
+    > fields terminated by ','
+    > lines terminated by '\n'
+    > stored as textfile;
+OK
+
+hive> describe  emp_hist;
+OK
+empid                   int
+city                    string
+eff_dt                  date
+exp_dt                  date
+
+load data local inpath "/home/admin/Desktop/Learning/Hive/data/emp_hist_rec.txt" into table emp_hist;
+ 
+[admin@localhost data]$ cat emp_hist_rec.txt
+100,Pune,2013-01-01,9999-12-31
+101,Delhi,2015-01-01,9999-12-31
+103,Bihar,2015-01-01,9999-12-31
+104,Delhi,2014-10-10,9999-12-31
+
+[admin@localhost data]$ cat emp_stag_rec.txt
+100,Pune
+101,Goa
+103,Mp
+104,Delhi
+105,Bang
+106,Mp
+
+hive> select * from emp_stagg;
+OK
+emp_stagg.empid emp_stagg.city
+100     Pune
+101     Goa
+103     Mp
+104     Delhi
+105     Bang
+106     Mp
+Time taken: 0.116 seconds, Fetched: 6 row(s)
+hive> select * from emp_hist;
+OK
+empid  	city   	eff_dt 			exp_dt
+100     Pune    2013-01-01      9999-12-31
+101     Delhi   2015-01-01      9999-12-31
+103     Bihar   2015-01-01      9999-12-31
+104     Delhi   2014-10-10      9999-12-31
+Time taken: 0.116 seconds, Fetched: 4 row(s)
+
+Implementation Into Hive:::
+----------------------------------
+Assuming that the source is sending a complete data file i.e. old, updated and new records.
+
+STEP1:Select all the expired records from HIST table
+
+hive> select * from emp_hist where exp_dt != '9999-12-31';
+
+zero records
+
+STEP2: Select all the records which are not changed from STG and HIST using inner join and filter on HIST.column = STG.column as below
+
+hive> select hist.* from emp_hist hist inner join emp_stagg stg on hist.empid=stg.empid where hist.city=stg.city;
+
+empid   city    eff_dt     		exp_dt
+100     Pune    2013-01-01      9999-12-31
+104     Delhi   2014-10-10      9999-12-31
+Time taken: 19.659 seconds, Fetched: 2 row(s)
+
+STEP3:Select all the new and updated records which are changed from STG_TAB using exclusive left join with HIST_TAB and set expiry and effective date as below
+
+hive> select stg.*,CURRENT_DATE as eff_dt,'9999-12-31' as exp_dt  from emp_stagg stg left join(select * from emp_hist where exp_dt = '9999-12-31') hist on hist.empid=stg.empid where hist.empid is null or hist.city != stg.city;
+
+stg.empid       stg.city        eff_dt  		exp_dt
+101     		Goa     		2019-12-24      9999-12-31
+103     		Mp      		2019-12-24      9999-12-31
+105     		Bang    		2019-12-24      9999-12-31
+106     		Mp      		2019-12-24      9999-12-31
+Time taken: 16.88 seconds, Fetched: 4 row(s)
+
+hive> select hist.*,CURRENT_DATE as exp_dt from (select empid,city,eff_dt from emp_hist where exp_dt='9999-12-31') hist left join emp_stagg stg on hist.empid=stg.empid where hist.empid is null or hist.city != stg.city;
+
+
+hist.empid      hist.city       hist.eff_dt     exp_dt
+101     		Delhi   		2015-01-01      2019-12-24
+103     		Bihar   		2015-01-01      2019-12-24
+Time taken: 17.139 seconds, Fetched: 2 row(s)
+
+
+unionall queries from 2-5 and insert overwrite result to HIST table
+
+
+(select hist.*,CURRENT_DATE as exp_dt from (select empid,city,eff_dt from emp_hist where exp_dt='9999-12-31') hist left join emp_stagg stg on hist.empid=stg.empid where hist.empid is null or hist.city != stg.city)
+union all
+(select stg.*,CURRENT_DATE as eff_dt,to_date('9999-12-31') as exp_dt  from emp_stagg stg left join(select * from emp_hist where exp_dt = '9999-12-31') hist on hist.empid=stg.empid where hist.empid is null or hist.city != stg.city)
+union all
+(select hist.* from emp_hist hist inner join emp_stagg stg on hist.empid=stg.empid where hist.city=stg.city)
+union all
+(select * from emp_hist where exp_dt != '9999-12-31')
+
+
+hive> select * from emp_hist;
+OK
+emp_hist.empid  emp_hist.city   emp_hist.eff_dt emp_hist.exp_dt
+100     Pune    2013-01-01      9999-12-31
+101     Delhi   2015-01-01      2019-12-24
+103     Bihar   2015-01-01      2019-12-24
+104     Delhi   2014-10-10      9999-12-31
+101     Goa     2019-12-24      9999-12-31
+103     Mp      2019-12-24      9999-12-31
+105     Bang    2019-12-24      9999-12-31
+106     Mp      2019-12-24      9999-12-31
+Time taken: 0.117 seconds, Fetched: 8 row(s)
+
+
+Desired Output:
+------------------
+empid   city    eff_dt      	exp_dt
+100     Pune    2013-01-01      9999-12-31
+101     Delhi   2015-01-01      2019-12-24
+103     Bihar   2015-01-01      2019-12-24
+104     Delhi   2014-10-10      9999-12-31
+101     Goa     2019-12-24      9999-12-31
+103     Mp      2019-12-24      9999-12-31
+105     Bang    2019-12-24      9999-12-31
+106     Mp      2019-12-24      9999-12-31
+
+hive> insert overwrite table emp_hist((select hist.*,CURRENT_DATE as exp_dt from (select empid,city,eff_dt from emp_hist where exp_dt='9999-12-31') hist left join emp_stagg stg on hist.empid=stg.empid where hist.empid is null or hist.city != stg.city))
+    > union all
+    > (select stg.*,CURRENT_DATE as eff_dt,to_date('9999-12-31') as exp_dt  from emp_stagg stg left join(select * from emp_hist where exp_dt = '9999-12-31') hist on hist.empid=stg.empid where hist.empid is null or hist.city != stg.city)
+    > union all
+    > (select hist.* from emp_hist hist inner join emp_stagg stg on hist.empid=stg.empid where hist.city=stg.city)
+    > union all
+    > (select * from emp_hist where exp_dt != '9999-12-31');
+
+	
+emp_hist.empid  emp_hist.city   emp_hist.eff_dt emp_hist.exp_dt
+100     		Pune    		2013-01-01      9999-12-31
+101     		Delhi   		2015-01-01      2019-12-24
+101     		Goa     		2019-12-24      9999-12-31
+103     		Bihar   		2015-01-01      2019-12-24
+103     		Mp      		2019-12-24      9999-12-31
+104     		Delhi   		2014-10-10      9999-12-31
+105     		Bang    		2019-12-24      9999-12-31
+106     		Mp      		2019-12-24      9999-12-31
+Time taken: 16.616 seconds, Fetched: 8 row(s)
+
+
+hive> describe formatted emp_hist;
+OK
+# col_name              data_type               comment
+
+empid                   int
+city                    string
+eff_dt                  date
+exp_dt                  date
+
+# Detailed Table Information
+Database:               mydb
+Owner:                  admin
+CreateTime:             Tue Dec 24 14:45:15 IST 2019
+LastAccessTime:         UNKNOWN
+Retention:              0
+Location:               hdfs://localhost:9000/user/hive/warehouse/mydb.db/emp_hist
+Table Type:             MANAGED_TABLE
+Table Parameters:
+        COLUMN_STATS_ACCURATE   {\"BASIC_STATS\":\"true\"}
+        numFiles                0
+        numRows                 0
+        rawDataSize             0
+        totalSize               0
+        transient_lastDdlTime   1577178915
+
+# Storage Information
+SerDe Library:          org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+InputFormat:            org.apache.hadoop.mapred.TextInputFormat
+OutputFormat:           org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+Compressed:             No
+Num Buckets:            -1
+Bucket Columns:         []
+Sort Columns:           []
+Storage Desc Params:
+        field.delim             ,
+        line.delim              \n
+        serialization.format    ,
+Time taken: 0.178 seconds, Fetched: 35 row(s)
+
+
+
